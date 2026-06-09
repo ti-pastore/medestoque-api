@@ -26,12 +26,11 @@ if uri.startswith('postgres://'):
 db = SQLAlchemy(app)
 jwt = JWTManager(app)
 
-# CORS: permite qualquer origem (ajuste FRONTEND_URL para restringir)
-CORS(app, resources={r"/api/*": {
-    "origins": os.environ.get('FRONTEND_URL', '*'),
-    "methods": ["GET", "POST", "DELETE", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization"]
-}})
+# CORS: libera todas as origens (seguro pois a API exige JWT em todas as rotas protegidas)
+CORS(app, resources={r"/api/*": {"origins": "*"}},
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "DELETE", "OPTIONS"],
+     supports_credentials=False)
 
 # ─────────────────────────────────────────
 # MODELOS
