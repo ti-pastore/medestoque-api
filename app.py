@@ -29,7 +29,7 @@ jwt = JWTManager(app)
 # CORS: libera todas as origens (seguro pois a API exige JWT em todas as rotas protegidas)
 CORS(app, resources={r"/api/*": {"origins": "*"}},
      allow_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "DELETE", "OPTIONS"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      supports_credentials=False)
 
 # ─────────────────────────────────────────
@@ -106,6 +106,9 @@ class NotaFiscal(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     numero = db.Column(db.String(50), nullable=False)
     fornecedor = db.Column(db.String(150), nullable=False)
+    observacao = db.Column(db.String(300), nullable=True)
+    data_chegada = db.Column(db.String(10), nullable=True)
+    hora_chegada = db.Column(db.String(5), nullable=True)
     valor_total = db.Column(db.Float, default=0)
     status = db.Column(db.String(20), default='pendente')   # pendente | confirmada
     unidade_id = db.Column(db.Integer, db.ForeignKey('unidades.id'), nullable=False)
@@ -343,6 +346,9 @@ def get_nfs():
     def nf_dict(nf):
         return {
             'id': nf.id, 'numero': nf.numero, 'fornecedor': nf.fornecedor,
+            'observacao': nf.observacao or '',
+            'data_chegada': nf.data_chegada or nf.criada_em.strftime('%Y-%m-%d'),
+            'hora_chegada': nf.hora_chegada or '',
             'valor_total': float(nf.valor_total or 0), 'status': nf.status,
             'criada_em': nf.criada_em.strftime('%d/%m/%Y'),
             'itens': [
@@ -362,7 +368,14 @@ def nova_nf():
     numero = data.get('numero', '').strip()
     fornecedor = data.get('fornecedor', '').strip()
     valor = float(data.get('valor', 0) or 0)
-    nf = NotaFiscal(numero=numero, fornecedor=fornecedor, valor_total=valor, unidade_id=user.unidade_id)
+    observacao = data.get('observacao', '').strip()
+    data_chegada = data.get('data_chegada', '') or datetime.utcnow().strftime('%Y-%m-%d')
+    hora_chegada = datetime.utcnow().strftime('%H:%M')
+    nf = NotaFiscal(
+        numero=numero, fornecedor=fornecedor, valor_total=valor,
+        observacao=observacao, data_chegada=data_chegada, hora_chegada=hora_chegada,
+        unidade_id=user.unidade_id
+    )
     db.session.add(nf)
     db.session.flush()
     for item in data.get('itens', []):
@@ -463,6 +476,26 @@ def novo_usuario():
     db.session.commit()
     return jsonify({'ok': True, 'usuario': u.to_dict()})
 
+@app.route('/api/admin/usuarios/<int:uid>', methods=['PUT'])
+@jwt_required()
+def editar_usuario(uid):
+    user = current_user()
+    if user.perfil != 'admin':
+        return jsonify({'ok': False, 'msg': 'Acesso restrito.'}), 403
+    u = db.session.get(Usuario, uid)
+    if not u:
+        return jsonify({'ok': False, 'msg': 'Usuário não encontrado.'}), 404
+    data = request.get_json() or {}
+    u.nome = data.get('nome', u.nome).strip()
+    u.email = data.get('email', u.email).strip()
+    u.perfil = data.get('perfil', u.perfil)
+    u.unidade_id = data.get('unidade_id') or None
+    senha = data.get('senha', '')
+    if senha:
+        u.set_senha(senha)
+    db.session.commit()
+    return jsonify({'ok': True, 'usuario': u.to_dict()})
+
 @app.route('/api/admin/usuarios/<int:uid>', methods=['DELETE'])
 @jwt_required()
 def deletar_usuario(uid):
@@ -490,6 +523,28 @@ def nova_unidade():
     return jsonify({'ok': True})
 
 # ─────────────────────────────────────────
+# CNPJ LOOKUP (público)
+# ─────────────────────────────────────────
+
+@app.route('/api/cnpj/<cnpj>')
+def consultar_cnpj(cnpj):
+    import urllib.request as urllib2
+    import json as _json
+    cnpj_limpo = cnpj.replace('.','').replace('/','').replace('-','').strip()
+    try:
+        url = f'https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}'
+        req = urllib2.Request(url, headers={'User-Agent': 'MedEstoque/1.0'})
+        with urllib2.urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read().decode())
+            return jsonify({
+                'ok': True,
+                'razao_social': data.get('razao_social', ''),
+                'nome_fantasia': data.get('nome_fantasia', '')
+            })
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+# ─────────────────────────────────────────
 # INICIALIZAÇÃO DO BANCO
 # ─────────────────────────────────────────
 
@@ -507,8 +562,28 @@ def init_db():
             db.session.commit()
             print('Banco iniciado. Login: admin@pastore.com / admin123')
 
+def migrate_db():
+    """Adiciona colunas novas sem quebrar banco existente."""
+    with app.app_context():
+        try:
+            from sqlalchemy import text
+            with db.engine.connect() as conn:
+                for col, coltype in [
+                    ('observacao', 'VARCHAR(300)'),
+                    ('data_chegada', 'VARCHAR(10)'),
+                    ('hora_chegada', 'VARCHAR(5)')
+                ]:
+                    try:
+                        conn.execute(text(f'ALTER TABLE notas_fiscais ADD COLUMN {col} {coltype}'))
+                        conn.commit()
+                    except Exception:
+                        pass  # coluna já existe
+        except Exception:
+            pass
+
 # Roda na inicialização (idempotente)
 init_db()
+migrate_db()
 
 if __name__ == '__main__':
     app.run(debug=True)
